@@ -1,0 +1,758 @@
+---
+title: "Risk Analysis of Storm Events Across the United States"
+author: "Hans W Hiser"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Summary
+This document contains analysis of the risk presented by storm events across the United States. Data for this analysis comes from the Storm Data database by NOAA. Risk from storm events is understood as the relation between severity of consequences from the event and the likelihood of an event occurring. Consequences of an event are described as harm to population health (fatalities and injuries) and as economic cost (property and crop damage).
+## Data
+The analysis uses the database Storm Data by the National Oceanic & Atmospheric Administrarion (NOAA). The raw database can be accessed [here](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2), and documentation can be accessed [here](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf). Data coverage spans from January 1950 to November 2011. Data includes date and time of event, duration, location (state, county, latitude and longitude), event type, magnitude, number of fatalities and injuries, cost of damage to propoerty, cost of damage to crops, state office responsible, and additional remarks. Storm event type is categorized in 48 different categories, shown in page 5, table 1 of the documentation. Description and classification criteria for each storm event type can be found in section 7 of the documentation.
+## Data Processing
+### Initial cleanup
+This section shows the entire data cleaning process, as well as the R code used to do so. The code is shown complete and can be run again to reproduce the study.
+First, load all necessary libraries for the analysis.
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+#library(ggplot2)
+```
+Load the data into R (this assumes the data is in your working directory).
+```{r}
+setwd("E:/RDir/FinalProject")
+stormdata <- read.csv("repdata_data_StormData.csv.bz2", stringsAsFactors = FALSE)
+```
+An initial exploration of the data.
+```{r}
+names(stormdata)
+```
+
+```{r}
+glimpse(stormdata)
+```
+
+```{r}
+length(unique(stormdata$EVTYPE)) 
+```
+
+```{r}
+summary(stormdata$FATALITIES)
+```
+
+```{r}
+summary(stormdata$INJURIES)
+```
+
+```{r}
+summary(stormdata$PROPDMG)
+```
+
+```{r}
+summary(stormdata$PROPDMGEXP)
+```
+
+```{r}
+summary(stormdata$CROPDMG)
+```
+
+```{r}
+summary(stormdata$CROPDMGEXP)
+```
+
+Initial exploration showed that fatalities and injuries are already in numerical form, but both property and crop damage variables are encoded as scientific numbers given by the _EXP columns. This will be addressed later.
+Start with an initial sub setting of the data, and some basic cleaning.
+```{r}
+stormdata2 <- stormdata %>%
+    select(BGN_DATE, STATE, EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)
+# Dates into POSIX
+stormdata2$BGN_DATE <- mdy_hms(stormdata2$BGN_DATE)
+# Variable names in lowercase
+names(stormdata2) <- tolower(names(stormdata2))
+str(stormdata2)
+```
+
+Transform property and crop damage into proper numbers. For this, only the exponents encoded “”, “H”, “T”, “M” and “B” are kept. “0”“,”-" and “” are assumed equivalent. Everything else will be discarded because their meaning is ambiguous and not explained in the documentation.
+```{r}
+stormdata2$propdmgexp <- stormdata2$propdmgexp %>%
+    toupper %>%
+    str_replace_all("-","") %>%
+    str_replace_all("0","")
+
+stormdata2$cropdmgexp <- stormdata2$cropdmgexp %>%
+    toupper %>%
+    str_replace_all("0","")
+
+validdmgexp <- c("", "H", "K", "M", "B")
+
+stormdata3 <- stormdata2 %>%
+    filter(propdmgexp %in% validdmgexp) %>%
+    filter(cropdmgexp %in% validdmgexp) %>%
+    mutate(propdmgtr = 0, cropdmgtr = 0)
+
+# Now, multiply the values in the dmg columns by the appropriate magnitude
+expmagnitude = c(1, 100, 1000, 1000000, 1000000000)
+for(i in seq_along(validdmgexp)) {
+    pexpind <- which(stormdata3$propdmgexp == validdmgexp[i])
+    cexpind <- which(stormdata3$cropdmgexp == validdmgexp[i])
+    stormdata3$propdmgtr[pexpind] <- stormdata3$propdmg[pexpind] * expmagnitude[i]
+    stormdata3$cropdmgtr[cexpind] <- stormdata3$cropdmg[cexpind] * expmagnitude[i]
+}
+
+# Number of entries removed
+dim(stormdata2)[1] - dim(stormdata3)[1]
+```
+
+```{r}
+(dim(stormdata2)[1] - dim(stormdata3)[1])/dim(stormdata2)[1] *100
+```
+
+### Cleaning the event type variable
+Unfortunately, this column is very messy and, in many cases, encoded in an arbitrary fashion. Since there are only 48 event types recognized in the database, a considerable amount of manual cleaning is necessary. First, some higher-level modifications.
+```{r}
+stormdata3$evtype <- str_trim(tolower(stormdata3$evtype))
+stormdata4 <- mutate(stormdata3, cleanevtype = "")
+```
+Clean obvious misspellings.
+```{r}
+stormdata4$cleanevtype <- stormdata4$evtype
+stormdata4$cleanevtype <- stormdata4$cleanevtype %>%
+    str_replace_all("\\s+", " ") %>% # clear all double spaces
+    str_replace_all("\\bav[a-z]*e\\b", "avalanche") %>% # avalanches
+    str_replace_all("cstl", "coastal") %>%
+    str_replace_all("erosin", "erosion") %>%
+    str_replace_all("coastal[a-z]", "coastal ") %>%
+    str_replace_all("^dust[a-z]", "dust ") %>%
+    str_replace_all("\\slood", " flood") %>%
+    str_replace_all("vog", "fog") %>% # fog
+    str_replace_all("\\bd[a-z]*l\\b", "devil") %>% # Dust devil
+    str_replace_all("\\bch[a-z]*l\\b", "chill") %>% # Chill
+    str_replace_all("fld", "flood") %>%
+    str_replace_all("\\bfloo[a-z]*\\b", "flood") %>% # floods
+    str_replace_all("hvy", "heavy") %>%
+    str_replace_all("\\bw[a-z]*d\\b", "wind") %>%
+    str_replace_all("\\bt[a-z]*m\\b", "thunderstorm") %>%
+    str_replace_all("tstmw", "thunderstorm") %>%
+    str_replace_all("^thunderstorm[a-z]", "thunderstorm") %>%
+    str_replace_all("^wayter", "water")
+```
+Remove observations where event type does not describe any official event type.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype
+stormdata4 <- stormdata4 %>%
+    filter(!str_detect(cleanevtype2, "^\\?")) %>% 
+    filter(!str_detect(cleanevtype2, "^apache")) %>%
+    filter(!str_detect(cleanevtype2, "^dam break")) %>%
+    filter(!str_detect(cleanevtype2, "^drowning")) %>%
+    filter(!str_detect(cleanevtype2, "^hyperthermia")) %>%
+    filter(!str_detect(cleanevtype2, "^hypothermia")) %>%
+    filter(!str_detect(cleanevtype2, "^marine accident")) %>%
+    filter(!str_detect(cleanevtype2, "^marine mishap")) %>%
+    filter(!str_detect(cleanevtype2, "^mild pattern")) %>%
+    filter(!str_detect(cleanevtype2, "^no severe weather")) %>%
+    filter(!str_detect(cleanevtype2, "^none")) %>%
+    filter(!str_detect(cleanevtype2, "^other")) %>%
+    filter(!str_detect(cleanevtype2, "^red flag criteria")) %>%
+    filter(!str_detect(cleanevtype2, "^southeast")) %>%
+    filter(!str_detect(cleanevtype2, "^summary"))
+```
+With misspellings corrected and nonsense observations removed, the manual process of cleaning event types can start. Events with more than one type are assumed to be the first event listed. Events synonyms are assigned to the appropriate event type. Name abbreviations are expanded.
+#### Astronomical Low Tide
+Also includes references to blow-out tides.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^blow-out.*$", "astronomical low tide")
+```
+#### Avalanche
+No synonyms or needed changes.
+#### Blizzard
+Also includes references to snowstorms and blowing snow.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^blizzard.*$", "blizzard") %>%
+    str_replace_all("^snowstorm", "blizzard") %>%
+    str_replace_all("ground blizzard", "blizzard") %>%
+    str_replace_all("^blowing\\ssnow.*$", "blizzard")
+```
+#### Coastal Flood
+Also includes references to erosion caused floods, beach floods and tidal floods.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^coastal(\\s[fs]|\\/).*$", "coastal flood") %>%
+    str_replace_all("^erosion.*$", "coastal flood") %>%
+    str_replace_all("^beach.*flood$", "coastal flood") %>%
+    str_replace_all("^tidal flood$", "coastal flood")
+```
+#### Cold/Wind Chill
+Also includes references to low temperature, unseasonably cold, bitter wind chill and prolonged cold.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    #cold/wind chill
+    str_replace_all("^cold.*$", "cold/wind chill") %>%
+    str_replace_all("^wind\\schill.*$", "cold/wind chill") %>%
+    str_replace_all("^bitter wind chill.*$", "cold/wind chill") %>%
+    str_replace_all("^low\\stemp.*$", "cold/wind chill") %>%
+    str_replace_all("^low wind chill", "cold/wind chill") %>%
+    str_replace_all("^low wind chill", "cold/wind chill") %>%
+    str_replace_all("^unseasonably co.*$", "cold/wind chill") %>%
+    str_replace_all("^prolong co.*$", "cold/wind chill")
+```
+#### Debris Flow
+Also includes references to mud flows, landslides and rock flows.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>% 
+    #debris flow
+    str_replace_all("^mud.*$", "debris flow") %>%
+    str_replace_all("^landsl.*$", "debris flow") %>%
+    str_replace_all("^rock\\ss.*$", "debris flow")
+```
+#### Dense Smoke
+Also includes references to smoke.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    #dense smoke
+    str_replace_all("^smoke.*$","dense smoke")
+```
+#### Dense Fog
+Also includes references to fog.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^fog.*$", "dense fog") 
+```
+#### Drought
+Also includes references to dry weather, extreme dry, excessive dry, abnormally dry, driest period, and unseasonably dry.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^dry.*$", "drought") %>%
+    str_replace_all("^ex[a-z]*\\b\\sdr.*$", "drought") %>%
+    str_replace_all("^very dry$", "drought") %>%
+    str_replace_all("^drought.*$", "drought") %>%
+    str_replace_all("^snow drought", "drought") %>%
+    str_replace_all("^abnormally dry", "drought") %>%
+    str_replace_all("^driest month", "drought") %>%
+    str_replace_all("^unseasonably dry", "drought") 
+```
+#### Dust Storm
+Also includes references to blowing dust and Saharan dust.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^dust\\sst.*$", "dust storm") %>%
+    str_replace_all("blowing dust", "dust storm") %>%
+    str_replace_all("saharan dust", "dust storm")
+```
+#### Dust devil
+No synonyms.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^dust\\sde.*$", "dust devil") 
+```
+#### Excessive Heat
+Also includes references to very warm, abnormal warmth, record heat, record warmth and record temperature.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>% 
+    str_replace_all("^ex[a-z]*\\b\\sheat.*$", "excessive heat") %>%
+    str_replace_all("^very warm$", "excessive heat") %>%
+    str_replace_all("^abnormal warmth", "excessive heat") %>%
+    str_replace_all("^record\\sheat.*$", "excessive heat") %>%
+    str_replace_all("^record\\swar.*$", "excessive heat") %>%
+    str_replace_all("^record\\stemp.*$", "excessive heat") 
+```
+#### Extreme Cold/Wind Chill
+Also includes references to excessive cold, extreme wind chill, record cold and severe cold.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^ex[a-z]*\\b\\scold.*$", "extreme cold/wind chill") %>%
+    str_replace_all("^ex[a-z]*\\b\\swind.*$", "extreme cold/wind chill") %>%
+    str_replace_all("^ex[a-z]*\\b\\/.*$", "extreme cold/wind chill") %>%
+    str_replace_all("^record\\scold.*$", "extreme cold/wind chill") %>%
+    str_replace_all("^severe\\scold.*$", "extreme cold/wind chill") 
+```
+#### Flash Flood
+Also includes references to local flash flood.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^flash.*$", "flash flood") %>%
+    str_replace_all("^local flash.*$", "flash flood") 
+```
+#### Flood
+Also includes references to any flood event that does not explicitly fall into the coastal, flash or lakeshore category.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^flood.*$", "flood") %>%
+    str_replace_all("^local flood", "flood") %>%
+    str_replace_all("^major flood", "flood") %>%
+    str_replace_all("^snowmelt flood", "flood") 
+```
+#### Freezing Fog
+Also includes references to glaze and freezing drizzle.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^glaze.*$", "freezing fog") %>%
+    str_replace_all("^freezing dri.*$", "freezing fog")
+```
+#### Frost/Freeze
+Also includes references to agricultural freeze, hard freeze, damaging freeze, icy roads and black ice.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^frost.*$", "frost/freeze") %>%
+    str_replace_all("^agric.*$", "frost/freeze") %>%
+    str_replace_all("^freeze.*$", "frost/freeze") %>%
+    str_replace_all("^hard freeze.*$", "frost/freeze") %>%
+    str_replace_all("^damaging freeze.*$", "frost/freeze") %>%
+    str_replace_all("^icy roads.*$", "frost/freeze") %>%
+    str_replace_all("^black ice.*$", "frost/freeze") 
+```
+#### Funnel Cloud
+Also includes references to wall clouds.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^funnel.*$", "funnel cloud") %>%
+    str_replace_all("^wall\\sc.*$", "funnel cloud") 
+```
+#### Hail
+Also includes references to small hail.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^hail.*$","hail") %>%
+    str_replace_all("^small hail.*$","hail") 
+```
+#### Heat
+Also includes references to hot weather, warm weather and unseasonably warm weather.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^heat.*$", "heat") %>%
+    str_replace_all("^hot.*$", "heat") %>%
+    str_replace_all("^warm.*$", "heat") %>%
+    str_replace_all("^unseasonably wa.*$", "heat")
+```
+#### Heavy Rain
+Also includes references to
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^heavy ra.*$", "heavy rain") %>%
+    str_replace_all("^torrential.*$", "heavy rain") %>%
+    str_replace_all("^ex[a-z]*\\b\\srain.*$", "heavy rain") %>%
+    str_replace_all("^ex[a-z]*\\b\\spreci.*$", "heavy rain") %>%
+    str_replace_all("^ex[a-z]*\\b\\swe.*$", "heavy rain") %>%
+    str_replace_all("^heavy\\spre.*$", "heavy rain") %>%
+    str_replace_all("^heavy\\ssh.*$", "heavy rain") %>%
+    str_replace_all("^locally heavy rain", "heavy rain") %>%
+    str_replace_all("^rain.*$", "heavy rain") %>%
+    str_replace_all("^record rain.*$", "heavy rain") %>%
+    str_replace_all("^monthly\\s[rp].*$", "heavy rain") %>%
+    str_replace_all("^unseasonably wet", "heavy rain") 
+```
+#### Heavy Snow
+Also includes references to other snow events not explicitly lake-effect related.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^heavy sno.*$", "heavy snow") %>%
+    str_replace_all("^heavy sno.*$", "heavy snow") %>%
+    str_replace_all("^ex[a-z]*\\b\\ssnow.*$", "heavy snow") %>%
+    str_replace_all("^snow.*$", "heavy snow") %>%
+    str_replace_all("^moderate snowfall", "heavy snow") 
+```
+#### High Surf
+Also includes references to heavy surf, heavy swell, high swell, rough surf and hazardous surf.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^heavy\\ssu.*$", "high surf") %>%
+    str_replace_all("^heavy\\ssw.*$", "high surf") %>%
+    str_replace_all("^high\\ssu.*$", "high surf") %>%
+    str_replace_all("^high\\ssw.*$", "high surf") %>%
+    str_replace_all("^rough\\ssu.*$", "high surf") %>%
+    str_replace_all("^hazardous surf", "high surf") 
+```
+#### High Wind
+Also includes references to heavy wind and gusty wind.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^high wi.*$", "high wind") %>%
+    str_replace_all("^heavy wi.*$", "high wind") %>%
+    str_replace_all("^gusty\\sw.*$", "high wind") 
+```
+#### Hurricane/Typhoon
+Includes all references to hurricanes and typhoons. For the purpose of this report, all events are aggregated, i.e., hurricanes and typhoons are not named.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^hurricane.*$", "hurricane/typhoon") %>%
+    str_replace_all("^typhoon$", "hurricane/typhoon") 
+```
+#### Ice Storm
+No synonyms in the database.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^ice.*$", "ice storm") 
+```
+#### Lake-effect Snow
+Also includes references to heavy lake snow.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^lake.*snow$", "lake-effect snow") %>%
+    str_replace_all("^heavy lake snow$", "lake-effect snow") 
+```
+#### Lakeshore Flood
+No synonyms in the database.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^lake.*flood$", "lakeshore flood") 
+```
+#### Lightning
+No synonyms in the database
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^light[a-z]*.*$", "lightning") 
+```
+#### Marine Hail
+No synonyms in the database.
+#### Marine High Wind
+No synonyms in the database.
+#### Marine Strong Wind
+No synonyms in the database.
+#### Marine Thunderstorm Winds
+Also includes references to coastal thunderstorms.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("coastal thunderstorm", "marine thunderstorm wind") 
+```
+#### Rip Current
+No synonyms in the database.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^rip.*$", "rip current") 
+```
+#### Seiche
+No synonyms in the database.
+#### Sleet
+Also includes references to freezing rain and freezing spray.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^sleet.*$", "sleet") %>%
+    str_replace_all("^freezing\\srain.*$", "sleet") %>%
+    str_replace_all("^freezing\\sspra.*$", "sleet") 
+```
+#### Storm/Surge Tide
+Also includes references to astronomical high tide.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^storm.*$", "storm surge/tide") %>%
+    str_replace_all("^astronomical high tide", "storm surge/tide") 
+```
+#### Strong Wind
+Also includes references to wind not included in other wind event types.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^strong wi.*$", "strong wind") %>%
+    str_replace_all("^wind.*$", "strong wind") 
+```
+#### Thunderstorm Wind
+Also includes references to thunderstorms, gusty thunderstorm wind and heavy thunderstorm wind.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^thunders[a-z]*.*$", "thunderstorm wind") %>%
+    str_replace_all("^gusty\\st.*$", "thunderstorm wind") %>%
+    str_replace_all("^severe\\sth.*$", "thunderstorm wind")
+``` 
+#### Tornado
+Also includes references to gustnado and landspout.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^torn.*$", "tornado") %>%
+    str_replace_all("^gustnado.*$", "tornado") %>%
+    str_replace_all("^landspout.*$", "tornado") 
+```
+#### Tropical Depression
+No sysnonyms in the database.
+#### Tropical Storm
+No synonyms in the database.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^tropical\\ss.*$", "tropical storm") 
+```
+#### Tsunami
+No synonyms in the database.
+#### Volcanic Ash
+Also include references to other volcanic events.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^volca.*$", "volcanic ash") 
+```
+#### Waterspout
+No synonyms in the database.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^water.*$","waterspout") 
+```
+#### Wildfire
+Also includes references to other fire events.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^.*fire.*$", "wildfire") 
+```
+#### Winter Storm
+No synonyms in the database.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    #winter storm
+    str_replace_all("^winter\\ss.*$", "winter storm") 
+```
+#### Winter Weather
+Also includes references to other winter events not included in previous event types.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^winter\\sw.*$", "winter weather") %>%
+    str_replace_all("^wint[a-z]*\\sm.*$", "winter weather") 
+```
+#### Finish cleaning the event types
+Include remaining references to floods into the Flood type.
+```{r}
+stormdata4$cleanevtype2 <- stormdata4$cleanevtype2 %>%
+    str_replace_all("^[^cfl].*flood", "flood")
+```
+And remove observations of the remaining event types that could not be reclassified.
+```{r}
+officialevtypes <- c("astronomical low tide",
+                     "avalanche",
+                     "blizzard",
+                     "coastal flood",
+                     "cold/wind chill",
+                     "debris flow",
+                     "dense fog",
+                     "dense smoke",
+                     "drought",
+                     "dust devil",
+                     "dust storm",
+                     "excessive heat",
+                     "extreme cold/wind chill",
+                     "flash flood",
+                     "flood",
+                     "freezing fog",
+                     "frost/freeze",
+                     "funnel cloud",
+                     "hail",
+                     "heat",
+                     "heavy rain",
+                     "heavy snow",
+                     "high surf",
+                     "high wind",
+                     "hurricane/typhoon",
+                     "ice storm",
+                     "lake-effect snow",
+                     "lakeshore flood",
+                     "lightning",
+                     "marine hail",
+                     "marine high wind",
+                     "marine strong wind",
+                     "marine thunderstorm wind",
+                     "rip current",
+                     "seiche",
+                     "sleet",
+                     "storm surge/tide",
+                     "strong wind",
+                     "thunderstorm wind",
+                     "tornado",
+                     "tropical depression",
+                     "tropical storm",
+                     "tsunami",
+                     "volcanic ash",
+                     "waterspout",
+                     "wildfire",
+                     "winter storm",
+                     "winter weather")
+
+#filter the data to only include official types
+finalstormdata <- stormdata4 %>%
+    filter(cleanevtype2 %in% officialevtypes) %>%
+    group_by(cleanevtype2) %>%
+    select(bgn_date, state, cleanevtype2, fatalities, injuries, propdmgtr, cropdmgtr)
+```
+## Analysis
+To evaluate risk from storm events, severity indicators were selected to represent the effects of storm events on population health and economic damage. Population effect indicators are the total, mean, median and max values for fatalities and injuries for each storm event type. Economic damage indicators are the total, mean, median, and max values for property damage and crop damage.
+To assess the likelihood of storm events, the average number of events per type per year was calculated. Since the data from the beginning of the database is sparse and this could bias the results, the analysis was done for both the entire database and the last 20 years reported.
+```{r}
+#make a summary table for the whole database
+fulldbsummary <- finalstormdata %>%
+    summarize(sumfatalities = sum(fatalities), meanfatalities = mean(fatalities), 
+              medianfatalities = median(fatalities), maxfatalities = max(fatalities),
+              suminjuries = sum(injuries), meaninjuries = mean(injuries),
+              medianinjuries = median(injuries), maxinjuries = max(injuries),
+              sumpropdmg = sum(propdmgtr), meanpropdmg = mean(propdmgtr),
+              medianpropdmg = median(propdmgtr), maxpropdmg = max(propdmgtr),
+              sumcropdmg = sum(cropdmgtr), meancropdmg = mean(cropdmgtr),
+              mediancropdmg = median(cropdmgtr), maxcropdmg = max(cropdmgtr)) %>%
+    mutate(nevents = count(finalstormdata, cleanevtype2)$n)
+
+# and another for the last 20 years (2011 is incomplete so 1991-2010)
+last20ydbsummary <- finalstormdata %>%
+    filter(year(bgn_date) > 1990 & year(bgn_date) < 2011) %>%
+    summarize(sumfatalities = sum(fatalities), meanfatalities = mean(fatalities), 
+              medianfatalities = median(fatalities), maxfatalities = max(fatalities),
+              suminjuries = sum(injuries), meaninjuries = mean(injuries),
+              medianinjuries = median(injuries), maxinjuries = max(injuries),
+              sumpropdmg = sum(propdmgtr), meanpropdmg = mean(propdmgtr),
+              medianpropdmg = median(propdmgtr), maxpropdmg = max(propdmgtr),
+              sumcropdmg = sum(cropdmgtr), meancropdmg = mean(cropdmgtr),
+              mediancropdmg = median(cropdmgtr), maxcropdmg = max(cropdmgtr)) %>%
+    mutate(nevents = count(filter(finalstormdata, year(bgn_date) > 1990 & year(bgn_date) < 2011), 
+                           cleanevtype2)$n)
+```
+
+## Results
+### Most damaging event types
+Most damaging event types are defined as the event types with the largest cummulative damage to either population health or economic cost over the entirety of the database coverage. The top five event types that have caused the most fatalities are, in descending order, tornadoes, excessive heat, heat, flash floods and lightning (figure 1a); tornadoes, thunderstorm winds, floods, excessive heat and lightning are the event types that have caused the most injuries (figure 1b). The top five events that have caused the largest damage to property are floods, hurricane/typhoons, tornadoes, storm surge/tides, and flash floods (figure 1c); droughts, floods, hurricane/typhoons, ice storms and hail are the event types the have caused the largest damage to crops (figure 1d).
+```{r}
+library(ggplot2)
+library(gridExtra)
+options(scipen = 4, digits = 2)
+
+psum1 <- fulldbsummary %>%
+    filter(sumfatalities > quantile(sumfatalities,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2,-sumfatalities), y=sumfatalities)) +
+    geom_bar(stat = "identity") + 
+    #scale_y_log10() + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    ylab("Total fatalities") +
+    xlab("")
+
+psum2 <- fulldbsummary %>%
+    filter(suminjuries > quantile(suminjuries,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2,-suminjuries), y=suminjuries)) +
+    geom_bar(stat = "identity") + 
+    #scale_y_log10() + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    ylab("Total injuries") +
+    xlab("")
+
+psum3 <- fulldbsummary %>%
+    filter(sumpropdmg > quantile(sumpropdmg,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2,-sumpropdmg), y=sumpropdmg)) +
+    geom_bar(stat = "identity") + 
+    #scale_y_log10() + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    ylab("Total property damage (USD)") +
+    xlab("Event type")
+
+psum4 <- fulldbsummary %>%
+    filter(sumcropdmg > quantile(sumcropdmg,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2,-sumcropdmg), y=sumcropdmg)) +
+    geom_bar(stat = "identity") + 
+    #scale_y_log10() + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    ylab("Total crop damage (USD)") +
+    xlab("Event type")
+
+grid.arrange(psum1, psum2, psum3, psum4, nrow=2)
+```
+
+Figure 1. Top five most damaging event types over the entirety of the database coverage, in terms of population health (fatalities and injuries) and economic damages (damage to property and damage to crops).
+### Most potentially damaging event types
+Some single event ocurrences can be particularly devastating, and this signal might be lost when looking at the average damage caused by an event type. The indicator most potentially damaging event type can address this question, and is defined as the event types with the maximum damage for any single event, to either population health or economic cost, over the entirety of the database coverage. The top five most potentially damaging event types in terms of fatalities are heat, tornadoes, excessive heat, tsunamis and tropical storms (figure 2a); in terms of injuries, tornadoes, ice storms, floods, hurricane/typhoons and excessive heat are the most potentially damaging (figure 2b). The top five most potentially damaging event types in terms of property damage are floods, storm surge/tides, hurricane/typhoons, tropical storms and winter storms (figure 2c); in terms of crop damage, floods, ice storms hurricane/typhoons, droughts and extreme cold/wind chill are the most potentially damaging.
+```{r}
+pmax1 <- fulldbsummary %>%
+    filter(maxfatalities > quantile(maxfatalities,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2, -maxfatalities), y=maxfatalities)) +
+    geom_bar(stat = "identity") + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    #scale_y_log10() + 
+    ylab("Max fatalities") +
+    xlab("")
+
+pmax2 <- fulldbsummary %>%
+    filter(maxinjuries > quantile(maxinjuries,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2, -maxinjuries), y=maxinjuries)) +
+    geom_bar(stat = "identity") + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    #scale_y_log10() + 
+    ylab("Max injuries") +
+    xlab("")
+
+pmax3 <- fulldbsummary %>%
+    filter(maxpropdmg > quantile(maxpropdmg,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2, -maxpropdmg), y=maxpropdmg)) +
+    geom_bar(stat = "identity") + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    #scale_y_log10() + 
+    ylab("Max property damage (USD)") +
+    xlab("Event type")
+
+pmax4 <- fulldbsummary %>%
+    filter(maxcropdmg > quantile(maxcropdmg,0.9)) %>%
+    ggplot(aes(x=reorder(cleanevtype2, -maxcropdmg), y=maxcropdmg)) +
+    geom_bar(stat = "identity") + 
+    theme(axis.text = element_text(angle = 45, hjust=1, vjust=1)) +
+    #scale_y_log10() + 
+    ylab("Max crop damage (USD)") +
+    xlab("Event type")
+
+grid.arrange(pmax1, pmax2, pmax3, pmax4, nrow=2)
+```
+
+Figure 2. Top five most potentially damaging event types for any single event occurrence over the entirety of the database coverage, in terms of population health (fatalities and injuries) and economic damages (damage to property and damage to crops).
+### Event types posing the highest risk
+The previous two results showed two different ways to understand damage from an event type. However, to caracterize the risk posed by any event, the severity of said event must be contrasted with its likelihood. Here, the likelihood of an event type is defined as the average number of event occurrences by type in a year. Only the last 20 years of data are used here to avoid bias from incomplete data.
+```{r}
+options(scipen = 3, digits = 2)
+
+phrisk1 <- last20ydbsummary %>%
+    ggplot(aes(x=nevents/20, y=meanfatalities)) +
+    geom_point(size=0.9) +
+    geom_text(data=subset(last20ydbsummary, meanfatalities>=quantile(meanfatalities, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    geom_text(data=subset(last20ydbsummary, nevents>=quantile(nevents, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    scale_x_log10(breaks=c(1,100,10000)) +
+    scale_y_log10() +
+    xlab("") +
+    ylab("Mean fatalities") +
+    coord_cartesian(xlim=c(0.5,100000), ylim=c(0.0001,100))
+
+phrisk2 <- last20ydbsummary %>%
+    ggplot(aes(x=nevents/20, y=meaninjuries)) +
+    geom_point(size=0.9) +
+    geom_text(data=subset(last20ydbsummary, meaninjuries>=quantile(meaninjuries, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    geom_text(data=subset(last20ydbsummary, nevents>=quantile(nevents, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    scale_x_log10(breaks=c(1,100,10000)) +
+    scale_y_log10() +
+    xlab("") +
+    ylab("Mean injuries")+
+    coord_cartesian(xlim=c(0.5,100000), ylim=c(0.001,1000))
+
+phrisk3 <- last20ydbsummary %>%
+    ggplot(aes(x=nevents/20, y=meanpropdmg)) +
+    geom_point(size=0.9) +
+    geom_text(data=subset(last20ydbsummary, meanpropdmg>=quantile(meanpropdmg, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    geom_text(data=subset(last20ydbsummary, nevents>=quantile(nevents, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    scale_x_log10(breaks=c(1,100,10000)) +
+    scale_y_log10() +
+    xlab("Events per year") +
+    ylab("Mean property damage (USD)")+
+    coord_cartesian(xlim=c(0.5,100000), ylim=c(10,10000000000))
+
+phrisk4 <- last20ydbsummary %>%
+    ggplot(aes(x=nevents/20, y=meancropdmg)) +
+    geom_point(size=0.9) +
+    geom_text(data=subset(last20ydbsummary, meancropdmg>=quantile(meancropdmg, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    geom_text(data=subset(last20ydbsummary, nevents>=quantile(nevents, 0.9)),
+              aes(label=cleanevtype2), hjust=-0.1, vjust=0, angle = 45, cex=3) +
+    scale_x_log10(breaks=c(1,100,10000)) +
+    scale_y_log10(breaks=c(100,10000,1000000,100000000)) +
+    xlab("Events per year") +
+    ylab("Mean crop damage (USD)")+
+    coord_cartesian(xlim=c(0.5,100000), ylim=c(10,1000000000))
+
+grid.arrange(phrisk1, phrisk2, phrisk3, phrisk4, ncol=2)
+```
+
+
+Figure 3. Risk to population health and economic damage posed by different event types. Labels are provided to identify the most common and most damaging event types.
+
